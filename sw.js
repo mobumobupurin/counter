@@ -1,6 +1,6 @@
 // オフライン対応用 Service Worker
 // アプリ本体を更新したら VERSION を上げる（ユーザーの記録データは IndexedDB にあり、ここでは消えない）
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE = `counter-${VERSION}`;
 const ASSETS = [
   './',
@@ -17,6 +17,7 @@ const ASSETS = [
   './js/views/card.js',
   './js/views/home.js',
   './js/views/editor.js',
+  './js/views/cropper.js',
   './js/views/reorder.js',
   './js/views/detail.js',
   './js/views/calendar.js',

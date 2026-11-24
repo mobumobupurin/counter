@@ -384,7 +384,7 @@ export async function setSetting(key, value) {
 }
 
 // ---------- 画像 ----------
-/** 画像ファイルを縮小して保存し、画像IDを返す */
+/** 画像ファイルを縮小して保存し、画像IDを返す（トリミングなし） */
 export async function saveImageFile(file, maxSize) {
   const blob = await resizeImage(file, maxSize);
   const id = uid();
@@ -392,19 +392,44 @@ export async function saveImageFile(file, maxSize) {
   return id;
 }
 
-async function resizeImage(file, maxSize) {
-  let bitmap;
+const SOURCE_MAX = 2400; // トリミングし直せるよう保存しておく元画像の最大サイズ
+
+/** 選んだ画像ファイルを、元画像として扱える大きさに縮小する */
+export function prepareSource(file) {
+  return resizeImage(file, SOURCE_MAX);
+}
+
+/**
+ * トリミング済み画像を保存して画像IDを返す
+ * @param {{blob:Blob, source?:Blob, crop?:object}} o
+ */
+export async function saveImage({ blob, source = null, crop = null }) {
+  const id = uid();
+  await db.put('images', { id, blob, source, crop });
+  return id;
+}
+
+/** 画像の保存データ（元画像・トリミング設定を含む） */
+export async function imageRecord(id) {
+  return id ? (await db.get('images', id)) || null : null;
+}
+
+async function loadBitmap(file) {
   try {
-    bitmap = await createImageBitmap(file);
+    return await createImageBitmap(file);
   } catch {
     // createImageBitmap 非対応形式は <img> 経由で読む
-    bitmap = await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => resolve(img);
       img.onerror = reject;
       img.src = URL.createObjectURL(file);
     });
   }
+}
+
+async function resizeImage(file, maxSize) {
+  const bitmap = await loadBitmap(file);
   const w = bitmap.width;
   const h = bitmap.height;
   const scale = Math.min(1, maxSize / Math.max(w, h));
@@ -415,7 +440,7 @@ async function resizeImage(file, maxSize) {
   canvas.height = ch;
   canvas.getContext('2d').drawImage(bitmap, 0, 0, cw, ch);
   if (bitmap.close) bitmap.close();
-  return new Promise((resolve) => canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.86));
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.88));
 }
 
 export async function imageURL(id) {
@@ -472,7 +497,14 @@ export async function exportBackup() {
     db.getAll('settings'),
   ]);
   const imgs = [];
-  for (const im of images) imgs.push({ id: im.id, data: await blobToDataURL(im.blob) });
+  for (const im of images) {
+    imgs.push({
+      id: im.id,
+      data: await blobToDataURL(im.blob),
+      source: im.source ? await blobToDataURL(im.source) : null,
+      crop: im.crop ?? null,
+    });
+  }
   return {
     app: 'counter',
     version: DATA_VERSION,
@@ -492,7 +524,8 @@ export async function importBackup(data) {
   await db.putMany('counters', data.counters.map(normalizeCounter));
   for (const im of data.images || []) {
     const blob = await (await fetch(im.data)).blob();
-    await db.put('images', { id: im.id, blob });
+    const source = im.source ? await (await fetch(im.source)).blob() : null;
+    await db.put('images', { id: im.id, blob, source, crop: im.crop ?? null });
   }
   const recs = (data.records || []).filter((r) => r && r.counterId && typeof r.day === 'string');
   for (const r of recs) await db.addRecord({ counterId: r.counterId, day: r.day, ts: r.ts ?? parseDayKey(r.day).getTime() });

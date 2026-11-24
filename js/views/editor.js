@@ -3,9 +3,15 @@ import * as S from '../store.js';
 import { h, esc, $, uid } from '../util.js';
 import { icon } from '../icons.js';
 import { openSheet, toast, placeholderStyle } from '../ui.js';
+import { openCropper } from './cropper.js';
 
 const ICON_MAX = 900; // ホーム用（カードは小さいので十分）
 const DETAIL_MAX = 1800; // 詳細画面用
+// 種類ごとのトリミング比率（アイコンはカードに合わせて正方形固定）
+const CROP_ASPECTS = {
+  icon: ['square'],
+  detail: ['original', 'square', 'landscape', 'portrait', 'wide'],
+};
 
 /** 新規登録（counter=null）または基本情報の編集 */
 export function openCounterEditor(counter, done) {
@@ -50,9 +56,11 @@ export function openCounterEditor(counter, done) {
     const id = kind === 'icon' ? draft.iconImageId : draft.detailImageId;
     const url = await S.imageURL(id);
     if (url) {
-      slot.innerHTML = `<img src="${url}" alt=""><span class="slot-actions"><span class="slot-badge">${icon('pencil', 14)}変更</span>${
-        `<span class="slot-badge danger" data-remove="${kind}">${icon('trash', 14)}</span>`
-      }</span>`;
+      slot.innerHTML = `<img src="${url}" alt=""><span class="slot-actions">
+          <span class="slot-badge" data-crop="${kind}">${icon('crop', 14)}切り取り</span>
+          <span class="slot-badge" data-change="${kind}">${icon('image', 14)}変更</span>
+          <span class="slot-badge danger" data-remove="${kind}" aria-label="画像を外す">${icon('trash', 14)}</span>
+        </span>`;
     } else if (kind === 'detail' && draft.iconImageId) {
       const iu = await S.imageURL(draft.iconImageId);
       slot.innerHTML = `<img src="${iu}" alt="" class="dim"><span class="slot-empty">${icon('image', 22)}<span>アイコン画像を使用中<br>タップで別の画像を選択</span></span>`;
@@ -78,13 +86,62 @@ export function openCounterEditor(counter, done) {
       paintSlot('detail');
       return;
     }
+    const changeBtn = e.target.closest('[data-change]');
     const slot = e.target.closest('.image-slot');
-    if (slot) {
-      pickingKind = slot.closest('[data-kind]').dataset.kind;
-      fileInput.value = '';
-      fileInput.click();
+    if (!slot) return;
+    e.preventDefault();
+    const kind = slot.closest('[data-kind]').dataset.kind;
+    const curId = kind === 'icon' ? draft.iconImageId : draft.detailImageId;
+    // 画像があるとき：「変更」以外のタップ（画像本体・切り取り）はトリミングし直し
+    if (curId && !changeBtn) {
+      recrop(kind, curId);
+      return;
     }
+    pickingKind = kind;
+    fileInput.value = '';
+    fileInput.click();
   });
+
+  /** 新しい画像IDを下書きに設定（このシートで作った古い画像は破棄） */
+  function setImage(kind, id) {
+    const old = kind === 'icon' ? draft.iconImageId : draft.detailImageId;
+    if (old && newImages.has(old)) {
+      newImages.delete(old);
+      S.discardImage(old);
+    }
+    newImages.add(id);
+    if (kind === 'icon') draft.iconImageId = id;
+    else draft.detailImageId = id;
+  }
+
+  /** トリミング画面を開き、決定したら保存する */
+  async function cropAndSave(kind, source, prevCrop) {
+    const res = await openCropper({
+      source,
+      aspects: CROP_ASPECTS[kind],
+      aspect: prevCrop?.aspect,
+      crop: prevCrop,
+      maxSize: kind === 'icon' ? ICON_MAX : DETAIL_MAX,
+      title: kind === 'icon' ? 'アイコン画像を切り取り' : '詳細画像を切り取り',
+    });
+    if (!res) return;
+    try {
+      const id = await S.saveImage({ blob: res.blob, source, crop: res.crop });
+      setImage(kind, id);
+      await paintSlot('icon');
+      await paintSlot('detail');
+    } catch (err) {
+      console.error(err);
+      toast('画像を保存できませんでした');
+    }
+  }
+
+  async function recrop(kind, id) {
+    const rec = await S.imageRecord(id);
+    if (!rec) return;
+    // 以前のデータ（元画像を持っていない画像）は、今の画像を元にする
+    await cropAndSave(kind, rec.source || rec.blob, rec.source ? rec.crop : null);
+  }
 
   fileInput.addEventListener('change', async () => {
     const f = fileInput.files?.[0];
@@ -92,24 +149,17 @@ export function openCounterEditor(counter, done) {
     const kind = pickingKind;
     const slot = $(`[data-kind="${kind}"] .image-slot`, body);
     slot.classList.add('loading');
+    let source;
     try {
-      const id = await S.saveImageFile(f, kind === 'icon' ? ICON_MAX : DETAIL_MAX);
-      newImages.add(id);
-      const old = kind === 'icon' ? draft.iconImageId : draft.detailImageId;
-      if (old && newImages.has(old)) {
-        newImages.delete(old);
-        S.discardImage(old);
-      }
-      if (kind === 'icon') draft.iconImageId = id;
-      else draft.detailImageId = id;
-      await paintSlot('icon');
-      await paintSlot('detail');
+      source = await S.prepareSource(f);
     } catch (err) {
       console.error(err);
       toast('画像を読み込めませんでした');
+      return;
     } finally {
       slot.classList.remove('loading');
     }
+    await cropAndSave(kind, source, null);
   });
 
   let tagEd = null;
